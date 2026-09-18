@@ -20,6 +20,11 @@ message InverterState {
   int32 unknown3 = 10;
   int32 unknown4 = 12;
   int32 bit_field = 20;       // a guess
+  int32 grid_current = 13;    // [A], factor 0.01
+  int32 power_factor = 14;    // factor 0.001
+  int32 warning_number = 15;
+  int32 modulation_index_signal = 16;
+  int32 firmware_version = 17;
 }
 
 message PortState {

@@ -71,7 +71,7 @@ impl HMSStateResponse {
     }
 
     fn short_dtu_sn(&self) -> String {
-        self.dtu_sn[..8].to_string()
+        self.dtu_sn.chars().take(8).collect()
     }
 
     fn get_total_efficiency(&self) -> f32 {
@@ -113,10 +113,18 @@ impl HMSStateResponse {
                 format!("{:.2}", inverter.grid_voltage as f32 * 0.1).into();
             json[format!("inv_{}_grid_freq", inverter.port_id)] =
                 format!("{:.2}", inverter.grid_freq as f32 * 0.01).into();
+            json[format!("inv_{}_current", inverter.port_id)] =
+                format!("{:.2}", inverter.grid_current as f32 * 0.01).into();
+            json[format!("inv_{}_power_factor", inverter.port_id)] =
+                format!("{:.3}", inverter.power_factor as f32 * 0.001).into();
             json[format!("inv_{}_pv_current_power", inverter.port_id)] =
                 format!("{:.2}", inverter.pv_current_power as f32 * 0.1).into();
             json[format!("inv_{}_temperature", inverter.port_id)] =
                 format!("{:.2}", inverter.temperature as f32 * 0.1).into();
+            json[format!("inv_{}_warning_number", inverter.port_id)] =
+                inverter.warning_number.into();
+            json[format!("inv_{}_modulation_index_signal", inverter.port_id)] =
+                inverter.modulation_index_signal.into();
         }
 
         json
@@ -211,6 +219,24 @@ impl HMSStateResponse {
                     &device_config,
                     &format!("Inverter {} Grid Frequency", idx),
                     &format!("inv_{}_grid_freq", idx),
+                ),
+                SensorConfig::current(
+                    state_topic,
+                    &device_config,
+                    &format!("Inverter {} Current", idx),
+                    &format!("inv_{}_current", idx),
+                ),
+                SensorConfig::string(
+                    state_topic,
+                    &device_config,
+                    &format!("Inverter {} Power Factor", idx),
+                    &format!("inv_{}_power_factor", idx),
+                ),
+                SensorConfig::string(
+                    state_topic,
+                    &device_config,
+                    &format!("Inverter {} Warning Number", idx),
+                    &format!("inv_{}_warning_number", idx),
                 ),
             ]);
         }

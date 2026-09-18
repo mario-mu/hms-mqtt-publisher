@@ -5,11 +5,17 @@ static MOD_RS: &[u8] = b"
 /// Generated from protobuf.
 pub mod RealData;
 /// Generated from protobuf.
-pub mod GetConfig;
+pub mod RealDataNew;
+/// Generated from protobuf.
+pub mod APPInfomationData;
 ";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let proto_files = ["src/protos/RealData.proto"];
+    let proto_files = [
+        "src/protos/RealData.proto",
+        "src/protos/RealDataNew.proto",
+        "src/protos/APPInfomationData.proto",
+    ];
 
     for path in &proto_files {
         println!("cargo:rerun-if-changed={path}");
