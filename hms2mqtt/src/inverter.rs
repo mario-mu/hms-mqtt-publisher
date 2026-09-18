@@ -49,7 +49,27 @@ pub struct Inverter<'a> {
     capabilities: Option<Capabilities>,
     enable_performance_mode: bool,
     initialize_power_limit: Option<u8>,
-    startup_commands_initialized: bool,
+    startup_command_state: StartupCommandState,
+}
+
+#[derive(Default)]
+struct StartupCommandState {
+    performance_mode_initialized: bool,
+    power_limit_initialized: bool,
+}
+
+impl StartupCommandState {
+    fn mark_performance_mode_initialized(&mut self) {
+        self.performance_mode_initialized = true;
+    }
+
+    fn mark_power_limit_initialized(&mut self) {
+        self.power_limit_initialized = true;
+    }
+
+    fn reset_performance_mode(&mut self) {
+        self.performance_mode_initialized = false;
+    }
 }
 
 impl<'a> Inverter<'a> {
@@ -69,7 +89,7 @@ impl<'a> Inverter<'a> {
             capabilities: None,
             enable_performance_mode,
             initialize_power_limit,
-            startup_commands_initialized: false,
+            startup_command_state: StartupCommandState::default(),
         }
     }
 
@@ -103,6 +123,8 @@ impl<'a> Inverter<'a> {
                     self.set_state(NetworkState::Offline);
                     return None;
                 }
+                self.startup_command_state.reset_performance_mode();
+                self.initialize_startup_commands();
 
                 match self.request_telemetry() {
                     Ok(response) => {
@@ -125,27 +147,27 @@ impl<'a> Inverter<'a> {
     }
 
     fn initialize_startup_commands(&mut self) {
-        if self.startup_commands_initialized {
-            return;
-        }
-
-        if self.enable_performance_mode {
+        if self.enable_performance_mode && !self.startup_command_state.performance_mode_initialized
+        {
             info!("Enabling performance data mode");
             match self.enable_performance_data_mode() {
                 Ok(()) => info!("Performance data mode enabled"),
                 Err(error) => warn!("Unable to enable performance data mode: {error:#}"),
             }
+            self.startup_command_state
+                .mark_performance_mode_initialized();
         }
 
         if let Some(power_limit) = self.initialize_power_limit {
-            info!("Initializing inverter power limit to {power_limit}%");
-            match self.set_power_limit(power_limit) {
-                Ok(()) => info!("Power limit initialized successfully"),
-                Err(error) => warn!("Unable to initialize inverter power limit: {error:#}"),
+            if !self.startup_command_state.power_limit_initialized {
+                info!("Initializing inverter power limit to {power_limit}%");
+                match self.set_power_limit(power_limit) {
+                    Ok(()) => info!("Power limit initialized successfully"),
+                    Err(error) => warn!("Unable to initialize inverter power limit: {error:#}"),
+                }
+                self.startup_command_state.mark_power_limit_initialized();
             }
         }
-
-        self.startup_commands_initialized = true;
     }
 
     fn load_capabilities(&mut self) -> Result<()> {
@@ -707,7 +729,7 @@ fn map_real_data_new(
 mod tests {
     use super::{
         build_frame, build_performance_data_mode_request, build_power_limit_request,
-        map_real_data_new, read_response, Capabilities, Inverter, COMMAND_RES_COMMAND,
+        map_real_data_new, read_response, Capabilities, COMMAND_RES_COMMAND,
         LEGACY_REAL_DATA_COMMAND,
     };
     use crate::protos::hoymiles::{
@@ -917,13 +939,19 @@ mod tests {
     }
 
     #[test]
-    fn disabled_startup_commands_are_initialized_only_once() {
-        let mut inverter = Inverter::with_options("127.0.0.1", false, None);
+    fn startup_command_state_reinitializes_only_performance_mode() {
+        let mut state = super::StartupCommandState::default();
 
-        inverter.initialize_startup_commands();
-        assert!(inverter.startup_commands_initialized);
+        assert!(!state.performance_mode_initialized);
+        assert!(!state.power_limit_initialized);
 
-        inverter.initialize_startup_commands();
-        assert!(inverter.startup_commands_initialized);
+        state.mark_performance_mode_initialized();
+        state.mark_power_limit_initialized();
+        assert!(state.performance_mode_initialized);
+        assert!(state.power_limit_initialized);
+
+        state.reset_performance_mode();
+        assert!(!state.performance_mode_initialized);
+        assert!(state.power_limit_initialized);
     }
 }

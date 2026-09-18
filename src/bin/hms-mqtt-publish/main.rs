@@ -30,6 +30,10 @@ struct Config {
 
 static REQUEST_DELAY_DEFAULT: u64 = 30_500;
 
+fn configured_request_delay(update_interval: Option<u64>) -> u64 {
+    update_interval.unwrap_or(REQUEST_DELAY_DEFAULT)
+}
+
 fn main() {
     logging::init_logger();
     info!("Running revision: {}", env!("GIT_HASH"));
@@ -55,14 +59,12 @@ fn main() {
     );
     let contents = fs::read_to_string(path).expect("Could not read config.toml");
     let config: Config = toml::from_str(&contents).expect("toml config unparsable");
+    let request_delay = configured_request_delay(config.update_interval);
 
-    if config
-        .update_interval
-        .is_some_and(|value| value > REQUEST_DELAY_DEFAULT)
-    {
+    if config.update_interval.is_some() {
         info!(
-            "using non-default update interval of {:.2}s",
-            (config.update_interval.unwrap() as f64 / 1000.)
+            "using configured update interval of {:.2}s",
+            (request_delay as f64 / 1000.)
         )
     } else {
         info!(
@@ -102,13 +104,23 @@ fn main() {
         }
 
         // TODO: the sleep has to move into the Inverter struct in an async implementation
-        if config
-            .update_interval
-            .is_some_and(|value| value > REQUEST_DELAY_DEFAULT)
-        {
-            thread::sleep(Duration::from_millis(config.update_interval.unwrap()));
-        } else {
-            thread::sleep(Duration::from_millis(REQUEST_DELAY_DEFAULT));
-        }
+        thread::sleep(Duration::from_millis(request_delay));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{configured_request_delay, REQUEST_DELAY_DEFAULT};
+
+    #[test]
+    fn uses_default_request_delay_when_not_configured() {
+        assert_eq!(configured_request_delay(None), REQUEST_DELAY_DEFAULT);
+    }
+
+    #[test]
+    fn uses_configured_request_delay_without_lower_bound() {
+        assert_eq!(configured_request_delay(Some(5_000)), 5_000);
+        assert_eq!(configured_request_delay(Some(30_500)), 30_500);
+        assert_eq!(configured_request_delay(Some(35_000)), 35_000);
     }
 }
