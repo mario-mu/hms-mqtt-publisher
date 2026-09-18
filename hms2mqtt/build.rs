@@ -8,6 +8,8 @@ pub mod RealData;
 pub mod RealDataNew;
 /// Generated from protobuf.
 pub mod APPInfomationData;
+/// Generated from protobuf.
+pub mod CommandPB;
 ";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -15,6 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "src/protos/RealData.proto",
         "src/protos/RealDataNew.proto",
         "src/protos/APPInfomationData.proto",
+        "src/protos/CommandPB.proto",
     ];
 
     for path in &proto_files {

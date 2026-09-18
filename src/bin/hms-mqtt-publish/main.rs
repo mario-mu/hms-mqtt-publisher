@@ -16,12 +16,14 @@ use std::fs;
 use std::thread;
 use std::time::Duration;
 
-use log::{error, info};
+use log::{error, info, warn};
 
 #[derive(Debug, Deserialize)]
 struct Config {
     inverter_host: String,
     update_interval: Option<u64>,
+    enable_performance_mode: Option<bool>,
+    initialize_power_limit: Option<u8>,
     home_assistant: Option<MqttConfig>,
     simple_mqtt: Option<MqttConfig>,
 }
@@ -68,9 +70,18 @@ fn main() {
             (REQUEST_DELAY_DEFAULT as f64 / 1000.)
         )
     }
+    if config.update_interval.is_some_and(|value| value < 32_000) {
+        warn!(
+            "polling interval is below 32s; some firmware versions may affect Hoymiles Cloud updates"
+        );
+    }
 
     info!("inverter host: {}", config.inverter_host);
-    let mut inverter = Inverter::new(&config.inverter_host);
+    let mut inverter = Inverter::with_options(
+        &config.inverter_host,
+        config.enable_performance_mode.unwrap_or(false),
+        config.initialize_power_limit,
+    );
 
     let mut output_channels: Vec<Box<dyn MetricCollector>> = Vec::new();
     if let Some(config) = config.home_assistant {

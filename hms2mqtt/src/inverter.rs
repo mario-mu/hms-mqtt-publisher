@@ -1,6 +1,7 @@
 use crate::crypto::{self, CryptoError};
 use crate::protos::hoymiles::{
     APPInfomationData::{APPInfoDataReqDTO, APPInfoDataResDTO},
+    CommandPB::{CommandReqDTO, CommandResDTO},
     RealData::{HMSStateResponse, RealDataResDTO},
     RealDataNew::{RealDataNewReqDTO, RealDataNewResDTO},
 };
@@ -21,7 +22,10 @@ const APP_INFO_COMMAND: u16 = 0xa301;
 const APP_INFO_REQUEST_COMMAND: u16 = 0xa201;
 const LEGACY_REAL_DATA_COMMAND: u16 = 0xa303;
 const REAL_DATA_NEW_COMMAND: u16 = 0xa311;
+const COMMAND_RES_COMMAND: u16 = 0xa305;
 const ENCRYPTION_FLAG_BIT: i64 = 25;
+const ACTION_LIMIT_POWER: i32 = 8;
+const ACTION_PERFORMANCE_DATA_MODE: i32 = 33;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum NetworkState {
@@ -43,15 +47,29 @@ pub struct Inverter<'a> {
     state: NetworkState,
     sequence: u16,
     capabilities: Option<Capabilities>,
+    enable_performance_mode: bool,
+    initialize_power_limit: Option<u8>,
+    startup_commands_initialized: bool,
 }
 
 impl<'a> Inverter<'a> {
     pub fn new(host: &'a str) -> Self {
+        Self::with_options(host, false, None)
+    }
+
+    pub fn with_options(
+        host: &'a str,
+        enable_performance_mode: bool,
+        initialize_power_limit: Option<u8>,
+    ) -> Self {
         Self {
             host,
             state: NetworkState::Unknown,
             sequence: 0_u16,
             capabilities: None,
+            enable_performance_mode,
+            initialize_power_limit,
+            startup_commands_initialized: false,
         }
     }
 
@@ -63,7 +81,6 @@ impl<'a> Inverter<'a> {
     }
 
     pub fn update_state(&mut self) -> Option<HMSStateResponse> {
-        let capabilities_were_loaded = self.capabilities.is_some();
         if self.capabilities.is_none() {
             if let Err(error) = self.load_capabilities() {
                 error!("Unable to read inverter application information: {error:#}");
@@ -71,8 +88,9 @@ impl<'a> Inverter<'a> {
                 return None;
             }
         }
+        self.initialize_startup_commands();
 
-        match self.request_telemetry(capabilities_were_loaded) {
+        match self.request_telemetry() {
             Ok(response) => {
                 self.set_state(NetworkState::Online);
                 Some(response)
@@ -86,7 +104,7 @@ impl<'a> Inverter<'a> {
                     return None;
                 }
 
-                match self.request_telemetry(false) {
+                match self.request_telemetry() {
                     Ok(response) => {
                         self.set_state(NetworkState::Online);
                         Some(response)
@@ -104,6 +122,30 @@ impl<'a> Inverter<'a> {
                 None
             }
         }
+    }
+
+    fn initialize_startup_commands(&mut self) {
+        if self.startup_commands_initialized {
+            return;
+        }
+
+        if self.enable_performance_mode {
+            info!("Enabling performance data mode");
+            match self.enable_performance_data_mode() {
+                Ok(()) => info!("Performance data mode enabled"),
+                Err(error) => warn!("Unable to enable performance data mode: {error:#}"),
+            }
+        }
+
+        if let Some(power_limit) = self.initialize_power_limit {
+            info!("Initializing inverter power limit to {power_limit}%");
+            match self.set_power_limit(power_limit) {
+                Ok(()) => info!("Power limit initialized successfully"),
+                Err(error) => warn!("Unable to initialize inverter power limit: {error:#}"),
+            }
+        }
+
+        self.startup_commands_initialized = true;
     }
 
     fn load_capabilities(&mut self) -> Result<()> {
@@ -154,17 +196,7 @@ impl<'a> Inverter<'a> {
         Ok(())
     }
 
-    fn request_telemetry(&mut self, refresh_application_info: bool) -> Result<HMSStateResponse> {
-        if self
-            .capabilities
-            .as_ref()
-            .is_some_and(|capabilities| capabilities.encrypted)
-            && refresh_application_info
-        {
-            info!("Refreshing application information before telemetry request");
-            self.load_capabilities()?;
-        }
-
+    fn request_telemetry(&mut self) -> Result<HMSStateResponse> {
         let capabilities = self
             .capabilities
             .clone()
@@ -174,6 +206,35 @@ impl<'a> Inverter<'a> {
         } else {
             self.request_legacy_real_data(&capabilities)
         }
+    }
+
+    fn enable_performance_data_mode(&mut self) -> Result<()> {
+        let request = build_performance_data_mode_request(unix_timestamp_i32()?)?;
+        let response = self.send_command(request)?;
+        validate_command_response(&response, ACTION_PERFORMANCE_DATA_MODE)
+    }
+
+    fn set_power_limit(&mut self, percent: u8) -> Result<()> {
+        let timestamp = unix_timestamp_i32()?;
+        let request = build_power_limit_request(percent, timestamp)?;
+        let response = self.send_command(request)?;
+        validate_command_response(&response, ACTION_LIMIT_POWER)
+    }
+
+    fn send_command(&mut self, request: CommandResDTO) -> Result<CommandReqDTO> {
+        let payload = request
+            .write_to_bytes()
+            .context("unable to serialize Hoymiles command request")?;
+        let response = self.send_request(
+            COMMAND_RES_COMMAND,
+            &payload,
+            self.capabilities
+                .as_ref()
+                .is_some_and(|capabilities| capabilities.encrypted),
+            &[COMMAND_RES_COMMAND, response_command(COMMAND_RES_COMMAND)],
+        )?;
+        CommandReqDTO::parse_from_bytes(&response)
+            .context("invalid Hoymiles command response protobuf")
     }
 
     fn request_legacy_real_data(
@@ -396,6 +457,46 @@ fn build_real_data_new_request(package: i32) -> Result<RealDataNewResDTO> {
     })
 }
 
+fn build_power_limit_request(percent: u8, timestamp: i32) -> Result<CommandResDTO> {
+    if percent > 100 {
+        return Err(anyhow!("power limit must be between 0 and 100 percent"));
+    }
+
+    Ok(CommandResDTO {
+        time: timestamp,
+        action: ACTION_LIMIT_POWER,
+        package_nub: 1,
+        tid: i64::from(timestamp),
+        data: format!("A:{},B:0,C:0\r", i32::from(percent) * 10),
+        ..Default::default()
+    })
+}
+
+fn build_performance_data_mode_request(timestamp: i32) -> Result<CommandResDTO> {
+    Ok(CommandResDTO {
+        time: timestamp,
+        action: ACTION_PERFORMANCE_DATA_MODE,
+        package_nub: 1,
+        ..Default::default()
+    })
+}
+
+fn validate_command_response(response: &CommandReqDTO, action: i32) -> Result<()> {
+    if response.action != 0 && response.action != action {
+        return Err(anyhow!(
+            "Hoymiles command response action mismatch: expected {action}, received {}",
+            response.action
+        ));
+    }
+    if response.err_code != 0 {
+        return Err(anyhow!(
+            "Hoymiles command action {action} failed with error code {}",
+            response.err_code
+        ));
+    }
+    Ok(())
+}
+
 fn current_time_string() -> String {
     Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
 }
@@ -405,6 +506,12 @@ fn unix_timestamp() -> Result<u32> {
         .duration_since(UNIX_EPOCH)
         .context("system clock is before Unix epoch")
         .map(|duration| duration.as_secs().try_into().unwrap_or(u32::MAX))
+}
+
+fn unix_timestamp_i32() -> Result<i32> {
+    unix_timestamp()?
+        .try_into()
+        .context("Unix timestamp does not fit into Hoymiles int32 field")
 }
 
 fn build_frame(
@@ -599,10 +706,16 @@ fn map_real_data_new(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_frame, map_real_data_new, read_response, Capabilities, LEGACY_REAL_DATA_COMMAND,
+        build_frame, build_performance_data_mode_request, build_power_limit_request,
+        map_real_data_new, read_response, Capabilities, Inverter, COMMAND_RES_COMMAND,
+        LEGACY_REAL_DATA_COMMAND,
     };
-    use crate::protos::hoymiles::RealDataNew::{PvMO, RealDataNewReqDTO, SGSMO};
+    use crate::protos::hoymiles::{
+        CommandPB::CommandResDTO,
+        RealDataNew::{PvMO, RealDataNewReqDTO, SGSMO},
+    };
     use crc16::{State, MODBUS};
+    use protobuf::Message;
     use std::io::{self, Read};
 
     struct PartialReader {
@@ -749,5 +862,68 @@ mod tests {
         assert_eq!(mapped.port_state.len(), 2);
         assert_eq!(mapped.port_state[1].pv_port, 2);
         assert_eq!(mapped.port_state[1].pv_energy_total, 1_312_058);
+    }
+
+    #[test]
+    fn serializes_performance_data_mode_request() {
+        let request = build_performance_data_mode_request(1_789_712_893).expect("request builds");
+
+        assert_eq!(request.time, 1_789_712_893);
+        assert_eq!(request.action, 33);
+        assert_eq!(request.package_nub, 1);
+        assert_eq!(request.tid, 0);
+        assert!(request.data.is_empty());
+    }
+
+    #[test]
+    fn serializes_power_limit_request_and_validates_bounds() {
+        let minimum = build_power_limit_request(0, 1_789_712_893).expect("request builds");
+        assert_eq!(minimum.data, "A:0,B:0,C:0\r");
+
+        let request = build_power_limit_request(100, 1_789_712_893).expect("request builds");
+
+        assert_eq!(request.time, 1_789_712_893);
+        assert_eq!(request.action, 8);
+        assert_eq!(request.package_nub, 1);
+        assert_eq!(request.tid, 1_789_712_893);
+        assert_eq!(request.data, "A:1000,B:0,C:0\r");
+        assert!(build_power_limit_request(101, 1_789_712_893).is_err());
+    }
+
+    #[test]
+    fn encrypted_command_uses_existing_frame_path() {
+        let enc_rand = [0x42_u8; 16];
+        let request = CommandResDTO {
+            action: 33,
+            package_nub: 1,
+            ..Default::default()
+        };
+        let payload = request.write_to_bytes().expect("request serializes");
+        let frame = build_frame(COMMAND_RES_COMMAND, 9, &payload, true, Some(&enc_rand))
+            .expect("encrypted command frame builds");
+        let mut reader = io::Cursor::new(frame);
+
+        let decrypted = read_response(
+            &mut reader,
+            9,
+            true,
+            Some(&enc_rand),
+            &[COMMAND_RES_COMMAND],
+        )
+        .expect("encrypted command frame reads");
+        let parsed = CommandResDTO::parse_from_bytes(&decrypted).expect("request parses");
+        assert_eq!(parsed.action, 33);
+        assert_eq!(parsed.package_nub, 1);
+    }
+
+    #[test]
+    fn disabled_startup_commands_are_initialized_only_once() {
+        let mut inverter = Inverter::with_options("127.0.0.1", false, None);
+
+        inverter.initialize_startup_commands();
+        assert!(inverter.startup_commands_initialized);
+
+        inverter.initialize_startup_commands();
+        assert!(inverter.startup_commands_initialized);
     }
 }
