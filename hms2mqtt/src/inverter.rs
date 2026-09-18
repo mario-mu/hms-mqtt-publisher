@@ -63,6 +63,7 @@ impl<'a> Inverter<'a> {
     }
 
     pub fn update_state(&mut self) -> Option<HMSStateResponse> {
+        let capabilities_were_loaded = self.capabilities.is_some();
         if self.capabilities.is_none() {
             if let Err(error) = self.load_capabilities() {
                 error!("Unable to read inverter application information: {error:#}");
@@ -71,7 +72,7 @@ impl<'a> Inverter<'a> {
             }
         }
 
-        match self.request_telemetry() {
+        match self.request_telemetry(capabilities_were_loaded) {
             Ok(response) => {
                 self.set_state(NetworkState::Online);
                 Some(response)
@@ -85,7 +86,7 @@ impl<'a> Inverter<'a> {
                     return None;
                 }
 
-                match self.request_telemetry() {
+                match self.request_telemetry(false) {
                     Ok(response) => {
                         self.set_state(NetworkState::Online);
                         Some(response)
@@ -107,6 +108,7 @@ impl<'a> Inverter<'a> {
 
     fn load_capabilities(&mut self) -> Result<()> {
         let request = build_application_info_request()?;
+        debug!("Sending A301 Application Information");
         let payload = self.send_request(
             APP_INFO_COMMAND,
             &request,
@@ -152,7 +154,17 @@ impl<'a> Inverter<'a> {
         Ok(())
     }
 
-    fn request_telemetry(&mut self) -> Result<HMSStateResponse> {
+    fn request_telemetry(&mut self, refresh_application_info: bool) -> Result<HMSStateResponse> {
+        if self
+            .capabilities
+            .as_ref()
+            .is_some_and(|capabilities| capabilities.encrypted)
+            && refresh_application_info
+        {
+            info!("Refreshing application information before telemetry request");
+            self.load_capabilities()?;
+        }
+
         let capabilities = self
             .capabilities
             .clone()
@@ -213,6 +225,7 @@ impl<'a> Inverter<'a> {
         request: &RealDataNewResDTO,
     ) -> Result<RealDataNewReqDTO> {
         let request_bytes = request.write_to_bytes()?;
+        debug!("Sending A311 RealDataNew");
         let payload = self.send_request(
             REAL_DATA_NEW_COMMAND,
             &request_bytes,
@@ -225,6 +238,56 @@ impl<'a> Inverter<'a> {
         RealDataNewReqDTO::parse_from_bytes(&payload)
             .context("invalid RealDataNew protobuf")
             .inspect(|response| {
+                debug!(
+                    "RealDataNew telemetry: timestamp={}, dtu_power={}, sgs_power={:?}, sgs_current={:?}, sgs_voltage={:?}, pv_power={:?}, pv_current={:?}, pv_voltage={:?}, pv_daily={:?}, pv_total={:?}, modulation={:?}",
+                    response.timestamp,
+                    response.dtu_power,
+                    response
+                        .sgs_data
+                        .iter()
+                        .map(|value| value.active_power)
+                        .collect::<Vec<_>>(),
+                    response
+                        .sgs_data
+                        .iter()
+                        .map(|value| value.current)
+                        .collect::<Vec<_>>(),
+                    response
+                        .sgs_data
+                        .iter()
+                        .map(|value| value.voltage)
+                        .collect::<Vec<_>>(),
+                    response
+                        .pv_data
+                        .iter()
+                        .map(|value| value.power)
+                        .collect::<Vec<_>>(),
+                    response
+                        .pv_data
+                        .iter()
+                        .map(|value| value.current)
+                        .collect::<Vec<_>>(),
+                    response
+                        .pv_data
+                        .iter()
+                        .map(|value| value.voltage)
+                        .collect::<Vec<_>>(),
+                    response
+                        .pv_data
+                        .iter()
+                        .map(|value| value.energy_daily)
+                        .collect::<Vec<_>>(),
+                    response
+                        .pv_data
+                        .iter()
+                        .map(|value| value.energy_total)
+                        .collect::<Vec<_>>(),
+                    response
+                        .sgs_data
+                        .iter()
+                        .map(|value| value.modulation_index_signal)
+                        .collect::<Vec<_>>()
+                );
                 debug!(
                     "Received RealDataNew page {} with {} SGS values and {} PV values",
                     response.cp,
